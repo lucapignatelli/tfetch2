@@ -1,0 +1,354 @@
+#!/usr/bin/env python3
+import re
+import subprocess
+import os
+import requests
+from bs4 import BeautifulSoup
+
+def get_os_info():
+    try:
+        with open('/etc/os-release') as f:
+            for line in f:
+                if line.startswith('PRETTY_NAME='):
+                    return line.split('=')[1].strip().strip('"')
+    except FileNotFoundError:
+        return "N/A"
+
+def get_kernel():
+    try:
+        return subprocess.check_output(['uname', '-r']).decode('utf-8').strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return "N/A"
+
+def get_cpu_info():
+    try:
+        with open('/proc/cpuinfo') as f:
+            for line in f:
+                if line.strip().startswith('model name'):
+                    cpu_name = line.split(':')[1].strip()
+                    # Extract a more concise name, e.g., "Intel i5-6600K"
+                    match = re.search(r'(Intel|AMD)\s*(?:Core\(TM\)|Ryzen)?\s*(.+?)(?:\s*CPU)?(?:\s*@.*)?$', cpu_name)
+                    if match:
+                        brand = match.group(1)
+                        model_part = match.group(2).replace('(TM)', '').replace('(R)', '').replace('Core', '').replace('Ryzen', '').strip()
+                        return f"{brand} {model_part}"
+                    return cpu_name
+    except FileNotFoundError:
+        return "N/A"
+
+def get_memory_info():
+    try:
+        with open('/proc/meminfo') as f:
+            mem_total = 0
+            mem_free = 0
+            for line in f:
+                if line.startswith('MemTotal:'):
+                    mem_total = int(line.split()[1])
+                elif line.startswith('MemAvailable:'):
+                    mem_free = int(line.split()[1])
+            return f"{mem_free // 1024}MiB / {mem_total // 1024}MiB"
+    except FileNotFoundError:
+        return "N/A"
+
+def get_gpu_info():
+    try:
+        gpus = subprocess.check_output(['lspci']).decode('utf-8')
+        gpu_lines = [line for line in gpus.split('\n') if 'VGA compatible controller' in line]
+        gpu_names = []
+        if gpu_lines:
+            for line in gpu_lines:
+                full_gpu_name = re.search(r': (.+)', line).group(1).strip()
+                match = re.search(r'(NVIDIA|AMD) (?:Corporation)?\s*(.+?)\s*\[(.+?)\]', full_gpu_name)
+                if match:
+                    gpu_names.append(f"{match.group(1)} {match.group(3)}")
+                else:
+                    gpu_names.append(re.sub(r'\[.+\]|\s*\([a-zA-Z0-9]+\)', '', full_gpu_name).strip())
+
+        gpu_memory = ""
+        try:
+            # Try to get NVIDIA GPU memory
+            nvidia_smi_output = subprocess.check_output(['nvidia-smi', '--query-gpu=memory.total', '--format=csv,noheader,nounits']).decode('utf-8').strip()
+            if nvidia_smi_output:
+                mem_total_mib = int(nvidia_smi_output)
+                gpu_memory = f" ({mem_total_mib // 1024}GiB)"
+        except (subprocess.CalledProcessError, FileNotFoundError, ValueError):
+            pass # nvidia-smi not found or failed, try other methods if needed
+
+        if gpu_names:
+            return ", ".join(gpu_names) + gpu_memory
+        else:
+            return "N/A"
+    except (subprocess.CalledProcessError, FileNotFoundError, AttributeError):
+        return "N/A"
+
+def get_display_info():
+    try:
+        xrandr_output = subprocess.check_output(['xrandr']).decode('utf-8')
+        connected_line = [line for line in xrandr_output.split('\n') if ' connected' in line][0]
+        
+        # Extract resolution (e.g., 1920x1080+0+0) and then just the base resolution (e.g., 1920x1080)
+        full_resolution = connected_line.split()[2]
+        base_resolution = full_resolution.split('+')[0]
+
+        # Find the line with the active resolution and its refresh rate
+        active_resolution_line = [line for line in xrandr_output.split('\n') if base_resolution in line and ('*' in line or '*+' in line)][0]
+        refresh_rate = re.search(r'\s+(\d+\.\d+)[*+]', active_resolution_line).group(1)
+
+        return f"{base_resolution} @ {refresh_rate}Hz"
+    except (subprocess.CalledProcessError, FileNotFoundError, IndexError, AttributeError):
+        return "N/A"
+
+def get_mouse_info():
+    try:
+        # Find mouse ID
+        xinput_output = subprocess.check_output(['xinput', 'list']).decode('utf-8')
+        mouse_line = [line for line in xinput_output.split('\n') if 'mouse' in line.lower() and 'pointer' in line.lower()][0]
+        mouse_id = re.search(r'id=(\d+)', mouse_line).group(1)
+
+        xinput_props = subprocess.check_output(['xinput', 'list-props', mouse_id]).decode('utf-8')
+
+        # Get hardware DPI
+        hardware_dpi = None
+        try:
+            device_node_line = [line for line in xinput_props.split('\n') if 'Device Node' in line][0]
+            device_node = device_node_line.split('\t')[-1].strip().strip('"')
+            udev_info = subprocess.check_output(['udevadm', 'info', device_node]).decode('utf-8')
+            dpi_line = [line for line in udev_info.split('\n') if 'MOUSE_DPI' in line][0]
+            dpi_info = dpi_line.split('=')[1]
+            hardware_dpi_str = [dpi for dpi in dpi_info.split() if '*' in dpi][0]
+            hardware_dpi = int(hardware_dpi_str.split('@')[0].replace('*', ''))
+        except (subprocess.CalledProcessError, FileNotFoundError, IndexError, AttributeError):
+            pass  # Could not get hardware DPI
+
+        # Get software scaling factor
+        scaling_factor = 1.0
+        try:
+            matrix_line = [line for line in xinput_props.split('\n') if 'Coordinate Transformation Matrix' in line][0]
+            matrix_values_str = matrix_line.split(':')[1].strip()
+            scaling_factor = float(matrix_values_str.split(',')[0])
+        except (IndexError, AttributeError):
+            pass  # Matrix not found or not in expected format, assume default scaling
+
+        # Get system mouse acceleration info (moved to separate function)
+
+        if hardware_dpi is None:
+            return "N/A"
+
+        if scaling_factor != 1.0:
+            effective_dpi = round(hardware_dpi * scaling_factor)
+            return f"{effective_dpi} DPI (Hardware: {hardware_dpi} DPI)"
+        else:
+            return f"{hardware_dpi} DPI"
+
+    except (subprocess.CalledProcessError, FileNotFoundError, IndexError, AttributeError):
+        return "N/A"
+
+def _get_system_mouse_accel_status():
+    try:
+        xinput_output = subprocess.check_output(['xinput', 'list']).decode('utf-8')
+        mouse_line = [line for line in xinput_output.split('\n') if 'mouse' in line.lower() and 'pointer' in line.lower()][0]
+        mouse_id = re.search(r'id=(\d+)', mouse_line).group(1)
+
+        xinput_props = subprocess.check_output(['xinput', 'list-props', mouse_id]).decode('utf-8')
+
+        accel_profile_line = [line for line in xinput_props.split('\n') if 'Device Accel Profile' in line]
+        if accel_profile_line:
+            profile_value = int(accel_profile_line[0].split(':')[1].strip().split('(')[0].strip())
+            if profile_value == 0:
+                return "Off"
+            else:
+                return "On"
+        else:
+            # Fallback for older systems or different configurations
+            constant_decel_line = [line for line in xinput_props.split('\n') if 'Device Accel Constant Deceleration' in line]
+            adaptive_decel_line = [line for line in xinput_props.split('\n') if 'Device Accel Adaptive Deceleration' in line]
+            if constant_decel_line or adaptive_decel_line:
+                return "On" # Presence of these implies acceleration is active
+            else:
+                return "Off"
+    except (subprocess.CalledProcessError, FileNotFoundError, IndexError, AttributeError):
+        return "N/A"
+
+def _get_windows_multiplier():
+    try:
+        xinput_output = subprocess.check_output(['xinput', 'list']).decode('utf-8')
+        mouse_line = [line for line in xinput_output.split('\n') if 'mouse' in line.lower() and 'pointer' in line.lower()][0]
+        mouse_id = re.search(r'id=(\d+)', mouse_line).group(1)
+
+        xinput_props = subprocess.check_output(['xinput', 'list-props', mouse_id]).decode('utf-8')
+
+        matrix_line = [line for line in xinput_props.split('\n') if 'Coordinate Transformation Matrix' in line][0]
+        matrix_values_str = matrix_line.split(':')[1].strip()
+        scaling_factor = float(matrix_values_str.split(',')[0])
+        return f"{scaling_factor:.2f}"
+    except (subprocess.CalledProcessError, FileNotFoundError, IndexError, AttributeError):
+        return "N/A"
+
+def get_latency():
+
+    try:
+        ping_output = subprocess.check_output(['ping', '-c', '4', 'google.com']).decode('utf-8')
+        avg_latency = re.search(r'rtt min/avg/max/mdev = \d+\.\d+/(\d+\.\d+)', ping_output).group(1)
+        return f"{avg_latency} ms"
+    except (subprocess.CalledProcessError, FileNotFoundError, AttributeError):
+        return "N/A"
+
+def get_swappiness():
+    try:
+        with open('/proc/sys/vm/swappiness') as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        return "N/A"
+
+def get_polling_rate():
+    try:
+        solaar_output = subprocess.check_output(['solaar', 'show']).decode('utf-8')
+        match = re.search(r'Report Rate\s*:\s*(\d+)ms', solaar_output)
+        if match:
+            ms = int(match.group(1))
+            if ms > 0:
+                hz = 1000 // ms
+                return f"{hz} Hz ({ms}ms)"
+        return "N/A"
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return "N/A"
+
+def get_window_manager():
+    try:
+        wm_output = subprocess.check_output(['wmctrl', '-m']).decode('utf-8')
+        match = re.search(r'Name: (.*)', wm_output)
+        if match:
+            return match.group(1).strip()
+        return "N/A"
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return "N/A"
+
+def get_vulkan_version():
+    try:
+        fastfetch_output = subprocess.check_output(['fastfetch', '-c', 'all.jsonc']).decode('utf-8')
+        match = re.search(r'Vulkan: (.*)', fastfetch_output)
+        if match:
+            return match.group(1).strip()
+        return "N/A"
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return "N/A"
+
+def get_tf2_setting(setting_name):
+    try:
+        with open('tf_configs/cfg/config.cfg') as f:
+            for line in f:
+                parts = line.strip().split()
+                if parts and parts[0] == setting_name:
+                    if len(parts) > 1:
+                        return parts[1].strip().strip('"')
+        return "N/A"
+    except FileNotFoundError:
+        return "N/A"
+
+def get_custom_hud():
+    custom_dir = 'tf_configs/custom'
+    try:
+        for item in os.listdir(custom_dir):
+            item_path = os.path.join(custom_dir, item)
+            if os.path.isdir(item_path) and item not in ['workshop', 'tf']:
+                return item
+    except FileNotFoundError:
+        return "N/A"
+    return "N/A"
+
+def get_headset_info():
+    try:
+        pactl_output = subprocess.check_output(['pactl', 'list', 'sinks']).decode('utf-8')
+        for line in pactl_output.split('\n'):
+            if 'Description:' in line and 'HyperX' in line:
+                return line.split(':')[1].strip()
+        return "N/A"
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return "N/A"
+
+def get_mastercomfig_preset():
+    custom_dir = 'tf_configs/custom'
+    try:
+        for filename in os.listdir(custom_dir):
+            if filename.startswith('mastercomfig') and filename.endswith('-preset.vpk'):
+                match = re.search(r'mastercomfig-([a-z-]+)-preset\.vpk', filename)
+                if match:
+                    return match.group(1).replace('-', ' ').title()
+    except FileNotFoundError:
+        return "N/A"
+    return "N/A"
+
+def get_custom_1():
+    return get_tf2_setting('sensitivity')
+
+def get_custom_2():
+    return f"{get_tf2_setting('fov_desired')} (Viewmodel: {get_tf2_setting('viewmodel_fov')})"
+
+def get_custom_3():
+    return f"{get_tf2_setting('cl_interp')} (Ratio: {get_tf2_setting('cl_interp_ratio')}) | Rates: {get_tf2_setting('rate')}/{get_tf2_setting('cl_updaterate')}/{get_tf2_setting('cl_cmdrate')}"
+
+def get_custom_4():
+    return f"{get_mastercomfig_preset()}"
+
+def get_custom_5():
+    return get_headset_info()
+
+def get_custom_6():
+    return f"{get_tf2_setting('cl_hud_minmode')}"
+
+def get_tf2_playtime():
+    return "8,244 hours"
+
+def get_custom_8():
+    return f"{get_tf2_setting('m_rawinput')}"
+
+def get_custom_9():
+    return f"{_get_system_mouse_accel_status()}"
+
+def get_custom_10():
+    return f"{_get_windows_multiplier()}"
+
+
+if __name__ == "__main__":
+    info = {
+        "OS": get_os_info(),
+        "Kernel": get_kernel(),
+        "CPU": get_cpu_info(),
+        "Memory": get_memory_info(),
+        "GPU": get_gpu_info(),
+        "Display": get_display_info(),
+        "Mouse": get_mouse_info(),
+        "Polling Rate": get_polling_rate(),
+        "Latency": get_latency(),
+        "Swappiness": get_swappiness(),
+    }
+
+    custom_info = {
+        "Sensitivity": get_custom_1(),
+        "FOV": get_custom_2(),
+        "Interp": get_custom_3(),
+        "Mastercomfig": get_custom_4(),
+        "Sound": get_custom_5(),
+        "Custom HUD": get_custom_hud(),
+        "Hours": get_tf2_playtime(),
+        "Raw Input": get_custom_8(),
+        "System Accel": get_custom_9(),
+        "Windows Multiplier": get_custom_10(),
+    }
+
+    # Determine the maximum key length for alignment
+    max_key_len = max(len(key) for key in info.keys())
+    max_custom_key_len = max(len(key) for key in custom_info.keys())
+
+    print("\033[1;34mSystem Information:\033[0m")
+    for key, value in info.items():
+        if isinstance(value, list):
+            print(f"  \033[1;32m{key.ljust(max_key_len)}:\033[0m")
+            for item in value:
+                print(f"    {item}")
+        else:
+            print(f"  \033[1;32m{key.ljust(max_key_len)}:\033[0m {value}")
+
+    print("\n\033[1;34mGame/Custom Information:\033[0m")
+    for key, value in custom_info.items():
+        print(f"  \033[1;32m{key.ljust(max_custom_key_len)}:\033[0m {value}")
