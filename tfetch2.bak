@@ -2,8 +2,6 @@
 import re
 import subprocess
 import os
-import requests
-from bs4 import BeautifulSoup
 
 def get_os_info():
     try:
@@ -296,8 +294,8 @@ def get_custom_5():
 def get_custom_6():
     return f"{get_tf2_setting('cl_hud_minmode')}"
 
-def get_tf2_playtime():
-    return "8,244 hours"
+def get_custom_7():
+    return f"{get_tf2_setting('tf_use_min_viewmodels')}"
 
 def get_custom_8():
     return f"{get_tf2_setting('m_rawinput')}"
@@ -329,8 +327,8 @@ if __name__ == "__main__":
         "Interp": get_custom_3(),
         "Mastercomfig": get_custom_4(),
         "Sound": get_custom_5(),
-        "Custom HUD": get_custom_hud(),
-        "Hours": get_tf2_playtime(),
+        "Minimal HUD": get_custom_6(),
+        "Minimal Viewmodels": get_custom_7(),
         "Raw Input": get_custom_8(),
         "System Accel": get_custom_9(),
         "Windows Multiplier": get_custom_10(),
@@ -338,17 +336,17 @@ if __name__ == "__main__":
 
     # Determine the maximum key length for alignment
     max_key_len = max(len(key) for key in info.keys())
-    max_custom_key_len = max(len(key) for key in custom_info.keys())
 
-    print("\033[1;34mSystem Information:\033[0m")
-    for key, value in info.items():
+    # Print side-by-side
+    keys = list(info.keys())
+    for i, key in enumerate(keys):
+        value = info[key]
+        custom_key = list(custom_info.keys())[i]
+        custom_value = custom_info[custom_key]
+
         if isinstance(value, list):
-            print(f"  \033[1;32m{key.ljust(max_key_len)}:\033[0m")
+            print(f"\033[1;32m{key.ljust(max_key_len)}:\033[0m")
             for item in value:
-                print(f"    {item}")
+                print(f"  - {item}")
         else:
-            print(f"  \033[1;32m{key.ljust(max_key_len)}:\033[0m {value}")
-
-    print("\n\033[1;34mGame/Custom Information:\033[0m")
-    for key, value in custom_info.items():
-        print(f"  \033[1;32m{key.ljust(max_custom_key_len)}:\033[0m {value}")
+            print(f"\033[1;32m{key.ljust(max_key_len)}:\033[0m {value.ljust(40)}   \033[1;32m{custom_key}:\033[0m {custom_value}")
