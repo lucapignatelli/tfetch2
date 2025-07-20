@@ -62,7 +62,7 @@ def get_gpu_info():
                 if match:
                     gpu_names.append(f"{match.group(1)} {match.group(3)}")
                 else:
-                    gpu_names.append(re.sub(r'\[.+\]|\s*\([a-zA-Z0-9]+\)', '', full_gpu_name).strip())
+                    gpu_names.append(re.sub(r'\[.+\]|\\s*\\([a-zA-Z0-9]+\\)', '', full_gpu_name).strip())
 
         gpu_memory = ""
         try:
@@ -84,15 +84,38 @@ def get_gpu_info():
 def get_display_info():
     try:
         xrandr_output = subprocess.check_output(['xrandr']).decode('utf-8')
-        connected_line = [line for line in xrandr_output.split('\n') if ' connected' in line][0]
-        
-        # Extract resolution (e.g., 1920x1080+0+0) and then just the base resolution (e.g., 1920x1080)
-        full_resolution = connected_line.split()[2]
+
+        # Find the primary connected display line
+        primary_display_line = None
+        for line in xrandr_output.split('\n'):
+            if ' connected primary' in line:
+                primary_display_line = line
+                break
+
+        if not primary_display_line:
+            return "N/A"
+
+        # Extract resolution from the primary display line (e.g., 1920x1080+0+0)
+        # This assumes the resolution is the third word after the display name
+        full_resolution = None
+        for part in primary_display_line.split():
+            if re.match(r'\d+x\d+\+\d+\+\d+', part):
+                full_resolution = part
+                break
+
+        if not full_resolution:
+            return "N/A"
+
         base_resolution = full_resolution.split('+')[0]
 
         # Find the line with the active resolution and its refresh rate
-        active_resolution_line = [line for line in xrandr_output.split('\n') if base_resolution in line and ('*' in line or '*+' in line)][0]
-        refresh_rate = re.search(r'\s+(\d+\.\d+)[*+]', active_resolution_line).group(1)
+        refresh_rate = "N/A"
+        for line in xrandr_output.split('\n'):
+            if base_resolution in line and ('*+' in line or '*' in line):
+                match = re.search(r'\s+(\d+\.\d+)[*+]', line)
+                if match:
+                    refresh_rate = match.group(1)
+                    break
 
         return f"{base_resolution} @ {refresh_rate}Hz"
     except (subprocess.CalledProcessError, FileNotFoundError, IndexError, AttributeError):
@@ -299,6 +322,8 @@ def get_custom_6():
 def get_tf2_playtime():
     return "8,244 hours"
 
+
+
 def get_custom_8():
     return f"{get_tf2_setting('m_rawinput')}"
 
@@ -331,8 +356,8 @@ if __name__ == "__main__":
         "Sound": get_custom_5(),
         "Custom HUD": get_custom_hud(),
         "Hours": get_tf2_playtime(),
-        "Raw Input": get_custom_8(),
-        "System Accel": get_custom_9(),
+        "Raw Input / System Accel": f"{get_custom_8()} / {get_custom_9()}",
+        "WM": get_window_manager(),
         "Windows Multiplier": get_custom_10(),
     }
 
