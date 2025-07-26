@@ -98,6 +98,19 @@ def get_display_info():
     except (subprocess.CalledProcessError, FileNotFoundError, IndexError, AttributeError):
         return "N/A"
 
+def find_tf2_path():
+    steam_paths = [
+        os.path.expanduser("~/.local/share/Steam"),
+        os.path.expanduser("~/.steam/steam"),
+        # Add other common Steam library paths if needed
+    ]
+
+    for steam_path in steam_paths:
+        tf2_path = os.path.join(steam_path, "steamapps", "common", "Team Fortress 2", "tf")
+        if os.path.isdir(tf2_path):
+            return tf2_path
+    return None
+
 def get_mouse_info():
     try:
         # Find mouse ID
@@ -234,26 +247,32 @@ def get_vulkan_version():
         return "N/A"
 
 def get_tf2_setting(setting_name):
-    try:
-        with open('tf_configs/cfg/config.cfg') as f:
-            for line in f:
-                parts = line.strip().split()
-                if parts and parts[0] == setting_name:
-                    if len(parts) > 1:
-                        return parts[1].strip().strip('"')
-        return "N/A"
-    except FileNotFoundError:
-        return "N/A"
+    tf2_path = find_tf2_path()
+    if tf2_path:
+        config_path = os.path.join(tf2_path, 'cfg', 'config.cfg')
+        try:
+            with open(config_path) as f:
+                for line in f:
+                    parts = line.strip().split()
+                    if parts and parts[0] == setting_name:
+                        if len(parts) > 1:
+                            return parts[1].strip().strip('"')
+            return "N/A"
+        except FileNotFoundError:
+            return "N/A"
+    return "N/A"
 
 def get_custom_hud():
-    custom_dir = 'tf_configs/custom'
-    try:
-        for item in os.listdir(custom_dir):
-            item_path = os.path.join(custom_dir, item)
-            if os.path.isdir(item_path) and item not in ['workshop', 'tf']:
-                return item
-    except FileNotFoundError:
-        return "N/A"
+    tf2_path = find_tf2_path()
+    if tf2_path:
+        custom_dir = os.path.join(tf2_path, 'custom')
+        try:
+            for item in os.listdir(custom_dir):
+                item_path = os.path.join(custom_dir, item)
+                if os.path.isdir(item_path) and item not in ['workshop', 'tf']:
+                    return item
+        except FileNotFoundError:
+            return "N/A"
     return "N/A"
 
 def get_headset_info():
@@ -267,15 +286,17 @@ def get_headset_info():
         return "N/A"
 
 def get_mastercomfig_preset():
-    custom_dir = 'tf_configs/custom'
-    try:
-        for filename in os.listdir(custom_dir):
-            if filename.startswith('mastercomfig') and filename.endswith('-preset.vpk'):
-                match = re.search(r'mastercomfig-([a-z-]+)-preset\.vpk', filename)
-                if match:
-                    return match.group(1).replace('-', ' ').title()
-    except FileNotFoundError:
-        return "N/A"
+    tf2_path = find_tf2_path()
+    if tf2_path:
+        custom_dir = os.path.join(tf2_path, 'custom')
+        try:
+            for filename in os.listdir(custom_dir):
+                if filename.startswith('mastercomfig') and filename.endswith('-preset.vpk'):
+                    match = re.search(r'mastercomfig-([a-z-]+)-preset\.vpk', filename)
+                    if match:
+                        return match.group(1).replace('-', ' ').title()
+        except FileNotFoundError:
+            return "N/A"
     return "N/A"
 
 def get_custom_1():
